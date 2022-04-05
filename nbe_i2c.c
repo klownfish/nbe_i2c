@@ -22,8 +22,10 @@ extern "C" {
 
 #define NBE_I2C_FIFO_SIZE 32
 
-nbe_i2c_t nbe_i2c0 = {.i2c_num = 0};
-nbe_i2c_t nbe_i2c1 = {.i2c_num = 1};
+static void nbe_i2c_pause(nbe_i2c_t *nbe_i2c);
+static void nbe_i2c_end(nbe_i2c_t *nbe_i2c);
+static void nbe_i2c_set_pin(i2c_port_t i2c_num, gpio_num_t sda_io_num, gpio_num_t scl_io_num, bool sda_pullup_en, bool scl_pullup_en);
+static void IRAM_ATTR nbe_i2c_isr(void *arg);
 
 static void nbe_i2c_set_pin(i2c_port_t i2c_num, gpio_num_t sda_io_num, gpio_num_t scl_io_num, bool sda_pullup_en, bool scl_pullup_en) {
     int sda_in_sig, sda_out_sig, scl_in_sig, scl_out_sig;
@@ -91,7 +93,8 @@ uint8_t i2c_first_byte_write(uint8_t address) {
     return address << 1 | 0;
 }
 
-void nbe_i2c_init(nbe_i2c_t *nbe_i2c, gpio_num_t sda, gpio_num_t scl, uint32_t frequency) {
+void nbe_i2c_init(nbe_i2c_t *nbe_i2c, uint8_t i2c_num, gpio_num_t sda, gpio_num_t scl, uint32_t frequency) {
+    nbe_i2c->i2c_num = i2c_num;
     nbe_i2c->hi2c.dev = I2C_LL_GET_HW(nbe_i2c->i2c_num);
     nbe_i2c->cmd.ack_en = 0; //dont care about ack
     nbe_i2c->cmd.ack_exp = 0; //expect a 0
@@ -142,20 +145,22 @@ void nbe_i2c_start(nbe_i2c_t *nbe_i2c) {
     nbe_i2c->cmd_index++;
 }
 
-void nbe_i2c_single_start_write(nbe_i2c_t *nbe_i2c, uint8_t address, uint8_t *tx_buf, uint8_t *rx_buf) {
+void nbe_i2c_start_write(nbe_i2c_t *nbe_i2c, uint8_t address, uint8_t *tx_buf, uint8_t *rx_buf) {
     nbe_i2c_reset(nbe_i2c);
     nbe_i2c_set_tx_buf(nbe_i2c, tx_buf);
     nbe_i2c_set_rx_buf(nbe_i2c, rx_buf);
     uint8_t byte = i2c_first_byte_write(address);
+    nbe_i2c_start(nbe_i2c);
     nbe_i2c_write_preamble(nbe_i2c, &byte, 1);
 
 }
 
-void nbe_i2c_single_start_read(nbe_i2c_t *nbe_i2c, uint8_t address, uint8_t *tx_buf, uint8_t *rx_buf) {
+void nbe_i2c_start_read(nbe_i2c_t *nbe_i2c, uint8_t address, uint8_t *tx_buf, uint8_t *rx_buf) {
     nbe_i2c_reset(nbe_i2c);
     nbe_i2c_set_tx_buf(nbe_i2c, tx_buf);
     nbe_i2c_set_rx_buf(nbe_i2c, rx_buf);
     uint8_t byte = i2c_first_byte_read(address);
+    nbe_i2c_start(nbe_i2c);
     nbe_i2c_write_preamble(nbe_i2c, &byte, 1);
 }
 
@@ -184,19 +189,20 @@ void nbe_i2c_read(nbe_i2c_t *nbe_i2c, uint8_t amount) {
     nbe_i2c->should_read += amount;
 }
 
-void nbe_i2c_pause(nbe_i2c_t *nbe_i2c) {
+static void nbe_i2c_pause(nbe_i2c_t *nbe_i2c) {
     nbe_i2c->cmd.op_code = I2C_LL_CMD_END;
     i2c_hal_write_cmd_reg(&nbe_i2c->hi2c, nbe_i2c->cmd, nbe_i2c->cmd_index);
     nbe_i2c->cmd_index++;
 }
 
-void nbe_i2c_stop(nbe_i2c_t *nbe_i2c) {
+static void nbe_i2c_stop(nbe_i2c_t *nbe_i2c) {
     nbe_i2c->cmd.op_code = I2C_LL_CMD_STOP;
     i2c_hal_write_cmd_reg(&nbe_i2c->hi2c, nbe_i2c->cmd, nbe_i2c->cmd_index);
     nbe_i2c->cmd_index++;
 }
 
 void nbe_i2c_commit(nbe_i2c_t *nbe_i2c) {
+    nbe_i2c_stop(nbe_i2c);
     nbe_i2c->has_written = nbe_i2c->should_write < (NBE_I2C_FIFO_SIZE - nbe_i2c->preamble_size) ? nbe_i2c->should_write : (NBE_I2C_FIFO_SIZE - nbe_i2c->preamble_size); 
     nbe_i2c->busy = 1;
     i2c_hal_write_txfifo(&nbe_i2c->hi2c, nbe_i2c->tx_buf, nbe_i2c->has_written);
